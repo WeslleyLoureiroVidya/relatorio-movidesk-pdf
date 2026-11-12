@@ -1,10 +1,9 @@
-name: Enviar Relatorio Movidesk por Email
+name: Enviar Relatório Movidesk
 
 on:
+  workflow_dispatch:        # botão "Run workflow" na aba Actions
   schedule:
-    # Roda toda segunda-feira às 08:00 UTC
-    - cron: '0 8 * * 1'
-  workflow_dispatch: # Permite disparar manualmente a qualquer momento
+    - cron: "0 11 * * 1"    # segunda 11:00 UTC = 08:00 em Brasília
 
 jobs:
   gerar-e-enviar:
@@ -16,11 +15,10 @@ jobs:
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
       - name: Instalar Dependencias
-        run: |
-          pip install requests reportlab
+        run: pip install requests reportlab
 
       - name: Executar Script de Geracao e Envio
         env:
@@ -28,5 +26,4 @@ jobs:
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
           MAIL_DESTINATARIO: ${{ secrets.MAIL_DESTINATARIO }}
-        run: |
-          python gerar_relatorio.py
+        run: python gerar_relatorio.py
