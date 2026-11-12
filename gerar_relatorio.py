@@ -28,9 +28,13 @@ NOME_ARQUIVO_PDF = "relatorio_artigos_movidesk.pdf"
 
 TAMANHO_PAGINA = 80
 MAX_PAGINAS = 100
+MAX_PAGINAS_FEEDBACK = 10
 PAUSA = 0.4  # segundos entre consultas
 MAX_FALHAS_SEGUIDAS = 8
 MAX_DIAGNOSTICOS = 6
+LIMITE_TEXTO_COMENTARIO = 300
+
+NOMES_AVALIACAO = {1: "Positivo", 2: "Negativo"}
 
 contador_diagnosticos = {"n": 0}
 
@@ -221,10 +225,65 @@ def para_int(valor):
     return None
 
 
+def texto_limpo(valor):
+    if isinstance(valor, str):
+        return valor.strip()
+    return ""
+
+
+def resumir_feedback(entrada):
+    data = texto_limpo(entrada.get("DateFormatted"))
+    if not data:
+        data = texto_limpo(entrada.get("ResponseDate"))[:10]
+
+    codigo = entrada.get("ArticleEvaluationPositiveNegativeResponse")
+    return {
+        "data": data,
+        "autor": texto_limpo(entrada.get("personName")),
+        "avaliacao": NOMES_AVALIACAO.get(codigo, "-"),
+        "motivo": texto_limpo(entrada.get("KbArticleEvaSettingsFieldsFeedbackName")),
+        "comentario": texto_limpo(entrada.get("comments")),
+    }
+
+
+def buscar_feedbacks(sessao, id_artigo):
+    """Retorna a lista de feedbacks do artigo, ou None se a consulta falhou."""
+    entradas = []
+
+    for pagina in range(1, MAX_PAGINAS_FEEDBACK + 1):
+        dados = obter_json(
+            sessao,
+            "/KbArticle/SearchSettingsFieldsFeedback",
+            {
+                "period": "",
+                "periodStartDate": "",
+                "periodEndDate": "",
+                "articleId": id_artigo,
+                "onlyComments": "false",
+                "language": "",
+                "page": pagina,
+            },
+        )
+        if not isinstance(dados, dict):
+            if pagina == 1:
+                return None
+            break
+
+        resultados = dados.get("results") or []
+        for item in resultados:
+            if isinstance(item, dict):
+                entradas.append(item)
+
+        if not dados.get("hasMore") or not resultados:
+            break
+        time.sleep(PAUSA)
+
+    return entradas
+
+
 def coletar_metricas(sessao, artigos):
     registros = []
     falhas_seguidas = 0
-    estrutura_comentario_mostrada = False
 
     for posicao, artigo in enumerate(artigos, start=1):
         id_artigo = artigo.get("Id")
@@ -236,6 +295,7 @@ def coletar_metricas(sessao, artigos):
             "views": None,
             "lidos": None,
             "comentarios": None,
+            "feedbacks": [],
         }
 
         painel = obter_json(
@@ -259,31 +319,12 @@ def coletar_metricas(sessao, artigos):
 
         time.sleep(PAUSA)
 
-        feedback = obter_json(
-            sessao,
-            "/KbArticle/SearchSettingsFieldsFeedback",
-            {
-                "period": "",
-                "periodStartDate": "",
-                "periodEndDate": "",
-                "articleId": id_artigo,
-                "onlyComments": "true",
-                "language": "",
-                "page": 1,
-            },
-        )
-        if isinstance(feedback, dict):
-            resultados = feedback.get("results") or []
-            quantidade = para_int(feedback.get("count"))
-            if quantidade is None:
-                quantidade = len(resultados)
-            registro["comentarios"] = quantidade
-
-            if resultados and not estrutura_comentario_mostrada:
-                primeiro = resultados[0]
-                if isinstance(primeiro, dict):
-                    print("Estrutura de um comentário (campos):", sorted(primeiro.keys()))
-                estrutura_comentario_mostrada = True
+        entradas = buscar_feedbacks(sessao, id_artigo)
+        if entradas is not None:
+            resumos = [resumir_feedback(e) for e in entradas]
+            com_conteudo = [r for r in resumos if r["motivo"] or r["comentario"]]
+            registro["feedbacks"] = com_conteudo
+            registro["comentarios"] = len(com_conteudo)
 
         registros.append(registro)
 
@@ -337,6 +378,14 @@ def criar_estilos():
             "AvisoRelatorio", parent=styles["Normal"], fontSize=9,
             textColor=colors.HexColor("#92400E"),
         ),
+        "item_titulo": ParagraphStyle(
+            "ItemTitulo", parent=styles["Normal"], fontSize=10,
+            textColor=colors.HexColor("#1F2937"), spaceBefore=8, spaceAfter=2,
+        ),
+        "detalhe": ParagraphStyle(
+            "DetalheFeedback", parent=styles["Normal"], fontSize=8.5,
+            textColor=colors.HexColor("#374151"), leftIndent=12, spaceAfter=1,
+        ),
     }
 
 
@@ -389,6 +438,24 @@ def adicionar_ranking(elementos, estilos, titulo_secao, rotulo, registros, metri
     elementos.append(montar_tabela(estilos, rotulo, itens, metrica, cor))
 
 
+def linha_feedback(fb):
+    partes = []
+    if fb["data"]:
+        partes.append(fb["data"])
+    if fb["autor"]:
+        partes.append(fb["autor"])
+    if fb["avaliacao"] != "-":
+        partes.append(fb["avaliacao"])
+    if fb["motivo"]:
+        partes.append("Motivo: " + fb["motivo"])
+    if fb["comentario"]:
+        comentario = fb["comentario"]
+        if len(comentario) > LIMITE_TEXTO_COMENTARIO:
+            comentario = comentario[:LIMITE_TEXTO_COMENTARIO] + "..."
+        partes.append("Comentário: " + comentario)
+    return " | ".join(partes)
+
+
 def adicionar_comentarios(elementos, estilos, registros):
     elementos.append(Paragraph("Artigos com comentários", estilos["secao"]))
 
@@ -405,7 +472,20 @@ def adicionar_comentarios(elementos, estilos, registros):
         elementos.append(Paragraph("Nenhum artigo possui comentários.", estilos["celula"]))
         return
 
-    elementos.append(montar_tabela(estilos, "Comentários", itens, "comentarios", "#7C3AED"))
+    elementos.append(
+        Paragraph(
+            "Inclui o motivo escolhido pelo leitor e o texto livre, quando houver.",
+            estilos["celula"],
+        )
+    )
+
+    for r in itens:
+        titulo = escape(str(r["titulo"]))
+        elementos.append(
+            Paragraph(f"<b>{titulo}</b> - {r['comentarios']} comentário(s)", estilos["item_titulo"])
+        )
+        for fb in r["feedbacks"]:
+            elementos.append(Paragraph(escape(linha_feedback(fb)), estilos["detalhe"]))
 
 
 def gerar_pdf(registros):
@@ -498,6 +578,9 @@ if __name__ == "__main__":
     for nome_metrica in ["views", "lidos", "likes", "dislikes", "comentarios"]:
         status = "ok" if metrica_disponivel(registros_finais, nome_metrica) else "SEM DADOS"
         print(f"Métrica {nome_metrica}: {status}")
+
+    total_com_comentarios = sum(1 for r in registros_finais if (r.get("comentarios") or 0) > 0)
+    print(f"Artigos com comentários/feedback: {total_com_comentarios}")
 
     gerar_pdf(registros_finais)
     enviar_email()
