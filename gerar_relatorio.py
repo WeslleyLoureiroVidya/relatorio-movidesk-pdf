@@ -21,25 +21,25 @@ MAIL_DESTINATARIO = os.environ.get("MAIL_DESTINATARIO")
 
 NOME_ARQUIVO_PDF = "relatorio_artigos_movidesk.pdf"
 
-# API pública do Movidesk (confirme na documentação se o caminho mudou)
 URL_ARTIGOS = "https://api.movidesk.com/public/v1/article"
 TAMANHO_PAGINA = 100
 MAX_PAGINAS = 50
 
+CHAVES_VIEWS = ("views", "viewCount", "viewsCount")
+CHAVES_LIKES = ("likes", "likesCount")
+CHAVES_DISLIKES = ("dislikes", "dislikesCount")
+
 
 def validar_variaveis():
-    faltando = [
-        nome
-        for nome, valor in [
-            ("MOVIDESK_TOKEN", MOVIDESK_TOKEN),
-            ("MAIL_USERNAME", MAIL_USERNAME),
-            ("MAIL_PASSWORD", MAIL_PASSWORD),
-            ("MAIL_DESTINATARIO", MAIL_DESTINATARIO),
-        ]
-        if not valor
-    ]
+    variaveis = {
+        "MOVIDESK_TOKEN": MOVIDESK_TOKEN,
+        "MAIL_USERNAME": MAIL_USERNAME,
+        "MAIL_PASSWORD": MAIL_PASSWORD,
+        "MAIL_DESTINATARIO": MAIL_DESTINATARIO,
+    }
+    faltando = [nome for nome, valor in variaveis.items() if not valor]
     if faltando:
-        print(f"Variáveis de ambiente ausentes: {', '.join(faltando)}")
+        print("Variáveis de ambiente ausentes: " + ", ".join(faltando))
         sys.exit(1)
 
 
@@ -75,8 +75,9 @@ def buscar_artigos_movidesk():
         if not lote:
             break
 
-        # Proteção caso a API ignore o $skip e repita a mesma página
-        primeiro_id = lote[0].get("id") if isinstance(lote[0], dict) else None
+        primeiro_id = None
+        if isinstance(lote[0], dict):
+            primeiro_id = lote[0].get("id")
         if primeiro_id is not None and primeiro_id == primeiro_id_anterior:
             break
         primeiro_id_anterior = primeiro_id
@@ -88,8 +89,7 @@ def buscar_artigos_movidesk():
     return artigos
 
 
-def numero(artigo, *chaves):
-    """Retorna o primeiro valor numérico encontrado entre as chaves."""
+def numero(artigo, chaves):
     for chave in chaves:
         valor = artigo.get(chave)
         if isinstance(valor, (int, float)):
@@ -101,7 +101,7 @@ def contar_comentarios(artigo):
     comentarios = artigo.get("comments")
     if isinstance(comentarios, list) and comentarios:
         return len(comentarios)
-    return numero(artigo, "commentsCount", "commentCount")
+    return numero(artigo, ("commentsCount", "commentCount"))
 
 
 def gerar_pdf(artigos):
@@ -153,17 +153,146 @@ def gerar_pdf(artigos):
     )
 
     total_artigos = len(artigos)
-    total_views = sum(numero(a, "views", "viewCount", "viewsCount") for a in artigos)
-    total_likes = sum(numero(a, "likes", "likesCount") for a in artigos)
+    total_views = sum(numero(a, CHAVES_VIEWS) for a in artigos)
+    total_likes = sum(numero(a, CHAVES_LIKES) for a in artigos)
     total_comments = sum(contar_comentarios(a) for a in artigos)
 
-    resumo_data = [
+    cab_resumo = [
+        Paragraph("Total de Artigos", cabecalho_estilo),
+        Paragraph("Total de Visualizações", cabecalho_estilo),
+        Paragraph("Total de Curtidas", cabecalho_estilo),
+        Paragraph("Total de Comentários", cabecalho_estilo),
+    ]
+    val_resumo = [
+        Paragraph(str(total_artigos), celula_estilo),
+        Paragraph(str(total_views), celula_estilo),
+        Paragraph(str(total_likes), celula_estilo),
+        Paragraph(str(total_comments), celula_estilo),
+    ]
+    resumo_data = [cab_resumo, val_resumo]
+
+    tabela_resumo = Table(resumo_data, colWidths=[130, 130, 130, 130])
+    estilo_resumo = TableStyle(
         [
-            Paragraph("Total de Artigos", cabecalho_estilo),
-            Paragraph("Total de Visualizações", cabecalho_estilo),
-            Paragraph("Total de Curtidas", cabecalho_estilo),
-            Paragraph("Total de Comentários", cabecalho_estilo),
-        ],
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2563EB")),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D1D5DB")),
+        ]
+    )
+    tabela_resumo.setStyle(estilo_resumo)
+    elementos.append(tabela_resumo)
+    elementos.append(Spacer(1, 15))
+
+    artigos_ordenados = sorted(
+        artigos, key=lambda a: numero(a, CHAVES_VIEWS), reverse=True
+    )
+
+    cabecalho = [
+        Paragraph("#", cabecalho_estilo),
+        Paragraph("Título do Artigo", cabecalho_estilo),
+        Paragraph("Views", cabecalho_estilo),
+        Paragraph("Likes", cabecalho_estilo),
+        Paragraph("Dislikes", cabecalho_estilo),
+        Paragraph("Coment.", cabecalho_estilo),
+    ]
+    tabela_dados = [cabecalho]
+
+    for index, artigo in enumerate(artigos_ordenados, start=1):
+        titulo = (
+            artigo.get("title")
+            or artigo.get("subject")
+            or artigo.get("articleTitle")
+            or "Sem título"
+        )
+        views = numero(artigo, CHAVES_VIEWS)
+        likes = numero(artigo, CHAVES_LIKES)
+        dislikes = numero(artigo, CHAVES_DISLIKES)
+        comentarios = contar_comentarios(artigo)
+
+        linha = []
+        linha.append(Paragraph(str(index), celula_estilo))
+        linha.append(Paragraph(escape(str(titulo)), celula_estilo))
+        linha.append(Paragraph(str(views), celula_estilo))
+        linha.append(Paragraph(str(likes), celula_estilo))
+        linha.append(Paragraph(str(dislikes), celula_estilo))
+        linha.append(Paragraph(str(comentarios), celula_estilo))
+        tabela_dados.append(linha)
+
+    tabela_artigos = Table(
+        tabela_dados, colWidths=[25, 275, 50, 50, 50, 70], repeatRows=1
+    )
+    estilo_artigos = TableStyle(
         [
-            Paragraph(str(total_artigos), celula_estilo),
-            Paragraph(str(total_views), celula_estilo),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F2937")),
+            ("ALIGN", (0, 0), (0, -1), "CENTER"),
+            ("ALIGN", (2, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
+        ]
+    )
+    tabela_artigos.setStyle(estilo_artigos)
+    elementos.append(tabela_artigos)
+
+    doc.build(elementos)
+    print(f"PDF gerado: {NOME_ARQUIVO_PDF}")
+
+
+def enviar_email():
+    if not os.path.exists(NOME_ARQUIVO_PDF):
+        print("Arquivo PDF não foi gerado.")
+        sys.exit(1)
+
+    msg = MIMEMultipart()
+    msg["From"] = MAIL_USERNAME
+    msg["To"] = MAIL_DESTINATARIO
+    msg["Subject"] = "Relatório Automatizado - Artigos Movidesk"
+
+    corpo = (
+        "Olá!\n\nSegue em anexo o relatório consolidado com o ranking dos "
+        "artigos da Base de Conhecimento do Movidesk.\n\n"
+        "Atenciosamente,\nAutomação VIDYA"
+    )
+    msg.attach(MIMEText(corpo, "plain", "utf-8"))
+
+    with open(NOME_ARQUIVO_PDF, "rb") as f:
+        part = MIMEBase("application", "pdf")
+        part.set_payload(f.read())
+    encoders.encode_base64(part)
+    part.add_header(
+        "Content-Disposition", f'attachment; filename="{NOME_ARQUIVO_PDF}"'
+    )
+    msg.attach(part)
+
+    destinatarios = [e.strip() for e in MAIL_DESTINATARIO.split(",")]
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=60) as server:
+            server.starttls()
+            server.login(MAIL_USERNAME, MAIL_PASSWORD)
+            server.sendmail(MAIL_USERNAME, destinatarios, msg.as_string())
+        print("E-mail enviado com sucesso!")
+    except Exception as e:
+        print(f"Erro ao enviar e-mail: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    validar_variaveis()
+    dados_artigos = buscar_artigos_movidesk()
+
+    if not dados_artigos:
+        print("Nenhum dado retornado pela API do Movidesk.")
+        sys.exit(1)
+
+    if isinstance(dados_artigos[0], dict):
+        print("Campos disponíveis no artigo:", sorted(dados_artigos[0].keys()))
+    print(f"{len(dados_artigos)} artigos recebidos.")
+
+    gerar_pdf(dados_artigos)
+    enviar_email()
