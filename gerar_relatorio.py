@@ -1,7 +1,8 @@
 import os
 import sys
+import time
 import smtplib
-from datetime import datetime
+from datetime import datetime, timedelta
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -21,13 +22,15 @@ MAIL_DESTINATARIO = os.environ.get("MAIL_DESTINATARIO")
 
 NOME_ARQUIVO_PDF = "relatorio_artigos_movidesk.pdf"
 
-URL_ARTIGOS = "https://api.movidesk.com/public/v1/article"
+URLS_CANDIDATAS = [
+    "https://api.movidesk.com/public/v1/kb/article",
+    "https://api.movidesk.com/public/v1/article",
+]
 TAMANHO_PAGINA = 100
-MAX_PAGINAS = 50
+MAX_PAGINAS = 100
+ESPERA_ENTRE_PAGINAS = 7  # limite da API: 10 requisições por minuto
 
-CHAVES_VIEWS = ("views", "viewCount", "viewsCount")
-CHAVES_LIKES = ("likes", "likesCount")
-CHAVES_DISLIKES = ("dislikes", "dislikesCount")
+STATUS_NOMES = {1: "Publicado", 2: "Suspenso", 4: "Suspenso"}
 
 
 def validar_variaveis():
@@ -43,65 +46,102 @@ def validar_variaveis():
         sys.exit(1)
 
 
-def buscar_artigos_movidesk():
+def buscar_pagina(url, pagina):
+    params = {
+        "token": MOVIDESK_TOKEN,
+        "page": pagina,
+        "pageSize": TAMANHO_PAGINA,
+    }
+    return requests.get(url, params=params, timeout=60)
+
+
+def buscar_com_url(url):
+    """Retorna a lista de artigos, ou None se a URL deu 404."""
     artigos = []
-    primeiro_id_anterior = None
+    total = None
 
     for pagina in range(MAX_PAGINAS):
-        params = {
-            "token": MOVIDESK_TOKEN,
-            "$top": TAMANHO_PAGINA,
-            "$skip": pagina * TAMANHO_PAGINA,
-        }
+        if pagina > 0:
+            time.sleep(ESPERA_ENTRE_PAGINAS)
+
         try:
-            response = requests.get(URL_ARTIGOS, params=params, timeout=60)
+            response = buscar_pagina(url, pagina)
         except Exception as e:
             print(f"Erro de conexão: {e}")
             return artigos
 
+        if response.status_code == 404 and pagina == 0:
+            print(f"404 em {url}")
+            return None
+
         if response.status_code != 200:
             print(f"Erro na API do Movidesk: {response.status_code}")
-            print(response.text[:500])
+            print(response.text[:300])
             return artigos
 
         try:
             dados = response.json()
         except ValueError:
             print("Resposta da API não é JSON válido:")
-            print(response.text[:500])
+            print(response.text[:300])
             return artigos
 
-        lote = dados if isinstance(dados, list) else [dados]
-        if not lote:
+        if isinstance(dados, dict):
+            itens = dados.get("items") or []
+            if total is None:
+                total = dados.get("totalSize")
+        else:
+            itens = dados
+
+        if not itens:
             break
 
-        primeiro_id = None
-        if isinstance(lote[0], dict):
-            primeiro_id = lote[0].get("id")
-        if primeiro_id is not None and primeiro_id == primeiro_id_anterior:
-            break
-        primeiro_id_anterior = primeiro_id
-
-        artigos.extend(lote)
-        if len(lote) < TAMANHO_PAGINA:
+        artigos.extend(itens)
+        if total is not None and len(artigos) >= total:
             break
 
     return artigos
 
 
-def numero(artigo, chaves):
-    for chave in chaves:
-        valor = artigo.get(chave)
-        if isinstance(valor, (int, float)):
-            return int(valor)
-    return 0
+def buscar_artigos_movidesk():
+    for url in URLS_CANDIDATAS:
+        print(f"Tentando {url}")
+        resultado = buscar_com_url(url)
+        if resultado is not None:
+            print(f"Endpoint que funcionou: {url}")
+            return resultado
+    return []
 
 
-def contar_comentarios(artigo):
-    comentarios = artigo.get("comments")
-    if isinstance(comentarios, list) and comentarios:
-        return len(comentarios)
-    return numero(artigo, ("commentsCount", "commentCount"))
+def parse_data(texto):
+    if not texto:
+        return None
+    try:
+        return datetime.strptime(str(texto)[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def data_curta(texto):
+    data = parse_data(texto)
+    if data is None:
+        return "-"
+    return data.strftime("%d/%m/%Y")
+
+
+def data_atualizacao(artigo):
+    return artigo.get("updatedAt") or artigo.get("updatedDate")
+
+
+def nome_menu(artigo):
+    menu = artigo.get("menu")
+    if isinstance(menu, dict) and menu.get("name"):
+        return str(menu["name"])
+    return "-"
+
+
+def nome_status(artigo):
+    return STATUS_NOMES.get(artigo.get("status"), "-")
 
 
 def gerar_pdf(artigos):
@@ -145,29 +185,34 @@ def gerar_pdf(artigos):
     )
 
     elementos.append(
-        Paragraph("Relatório Consolidado - Base de Conhecimento", titulo_estilo)
+        Paragraph("Relatório - Base de Conhecimento", titulo_estilo)
     )
     data_atual = datetime.now().strftime("%d/%m/%Y")
     elementos.append(
-        Paragraph(f"Gerado em: {data_atual} | Ranking de artigos", subtitulo_estilo)
+        Paragraph(f"Gerado em: {data_atual}", subtitulo_estilo)
     )
 
+    limite = datetime.now() - timedelta(days=30)
     total_artigos = len(artigos)
-    total_views = sum(numero(a, CHAVES_VIEWS) for a in artigos)
-    total_likes = sum(numero(a, CHAVES_LIKES) for a in artigos)
-    total_comments = sum(contar_comentarios(a) for a in artigos)
+    publicados = sum(1 for a in artigos if a.get("status") == 1)
+    suspensos = sum(1 for a in artigos if a.get("status") in (2, 4))
+    recentes = 0
+    for a in artigos:
+        data = parse_data(data_atualizacao(a))
+        if data is not None and data >= limite:
+            recentes += 1
 
     cab_resumo = [
         Paragraph("Total de Artigos", cabecalho_estilo),
-        Paragraph("Total de Visualizações", cabecalho_estilo),
-        Paragraph("Total de Curtidas", cabecalho_estilo),
-        Paragraph("Total de Comentários", cabecalho_estilo),
+        Paragraph("Publicados", cabecalho_estilo),
+        Paragraph("Suspensos", cabecalho_estilo),
+        Paragraph("Atualizados (30 dias)", cabecalho_estilo),
     ]
     val_resumo = [
         Paragraph(str(total_artigos), celula_estilo),
-        Paragraph(str(total_views), celula_estilo),
-        Paragraph(str(total_likes), celula_estilo),
-        Paragraph(str(total_comments), celula_estilo),
+        Paragraph(str(publicados), celula_estilo),
+        Paragraph(str(suspensos), celula_estilo),
+        Paragraph(str(recentes), celula_estilo),
     ]
     resumo_data = [cab_resumo, val_resumo]
 
@@ -187,48 +232,43 @@ def gerar_pdf(artigos):
     elementos.append(Spacer(1, 15))
 
     artigos_ordenados = sorted(
-        artigos, key=lambda a: numero(a, CHAVES_VIEWS), reverse=True
+        artigos,
+        key=lambda a: str(data_atualizacao(a) or ""),
+        reverse=True,
     )
 
     cabecalho = [
         Paragraph("#", cabecalho_estilo),
         Paragraph("Título do Artigo", cabecalho_estilo),
-        Paragraph("Views", cabecalho_estilo),
-        Paragraph("Likes", cabecalho_estilo),
-        Paragraph("Dislikes", cabecalho_estilo),
-        Paragraph("Coment.", cabecalho_estilo),
+        Paragraph("Status", cabecalho_estilo),
+        Paragraph("Menu", cabecalho_estilo),
+        Paragraph("Criado", cabecalho_estilo),
+        Paragraph("Atualizado", cabecalho_estilo),
     ]
     tabela_dados = [cabecalho]
 
     for index, artigo in enumerate(artigos_ordenados, start=1):
-        titulo = (
-            artigo.get("title")
-            or artigo.get("subject")
-            or artigo.get("articleTitle")
-            or "Sem título"
-        )
-        views = numero(artigo, CHAVES_VIEWS)
-        likes = numero(artigo, CHAVES_LIKES)
-        dislikes = numero(artigo, CHAVES_DISLIKES)
-        comentarios = contar_comentarios(artigo)
-
+        titulo = artigo.get("title") or "Sem título"
         linha = []
         linha.append(Paragraph(str(index), celula_estilo))
         linha.append(Paragraph(escape(str(titulo)), celula_estilo))
-        linha.append(Paragraph(str(views), celula_estilo))
-        linha.append(Paragraph(str(likes), celula_estilo))
-        linha.append(Paragraph(str(dislikes), celula_estilo))
-        linha.append(Paragraph(str(comentarios), celula_estilo))
+        linha.append(Paragraph(nome_status(artigo), celula_estilo))
+        linha.append(Paragraph(escape(nome_menu(artigo)), celula_estilo))
+        linha.append(
+            Paragraph(data_curta(artigo.get("createdAt") or artigo.get("createdDate")), celula_estilo)
+        )
+        linha.append(
+            Paragraph(data_curta(data_atualizacao(artigo)), celula_estilo)
+        )
         tabela_dados.append(linha)
 
     tabela_artigos = Table(
-        tabela_dados, colWidths=[25, 275, 50, 50, 50, 70], repeatRows=1
+        tabela_dados, colWidths=[28, 215, 60, 90, 62, 62], repeatRows=1
     )
     estilo_artigos = TableStyle(
         [
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F2937")),
             ("ALIGN", (0, 0), (0, -1), "CENTER"),
-            ("ALIGN", (2, 0), (-1, -1), "CENTER"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
             ("TOPPADDING", (0, 0), (-1, -1), 6),
@@ -254,8 +294,8 @@ def enviar_email():
     msg["Subject"] = "Relatório Automatizado - Artigos Movidesk"
 
     corpo = (
-        "Olá!\n\nSegue em anexo o relatório consolidado com o ranking dos "
-        "artigos da Base de Conhecimento do Movidesk.\n\n"
+        "Olá!\n\nSegue em anexo o relatório dos artigos da Base de "
+        "Conhecimento do Movidesk.\n\n"
         "Atenciosamente,\nAutomação VIDYA"
     )
     msg.attach(MIMEText(corpo, "plain", "utf-8"))
