@@ -1,10 +1,11 @@
+import calendar
 import json
 import os
 import re
 import sys
 import time
 import smtplib
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
@@ -22,6 +23,10 @@ MOVIDESK_PASSWORD = os.environ.get("MOVIDESK_PASSWORD")
 MAIL_USERNAME = os.environ.get("MAIL_USERNAME")
 MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD")
 MAIL_DESTINATARIO = os.environ.get("MAIL_DESTINATARIO")
+
+PERIODO = os.environ.get("PERIODO", "acumulado")
+DATA_INICIO = os.environ.get("DATA_INICIO", "")
+DATA_FIM = os.environ.get("DATA_FIM", "")
 
 BASE = "https://vidya-code.movidesk.com"
 NOME_ARQUIVO_PDF = "relatorio_artigos_movidesk.pdf"
@@ -51,6 +56,94 @@ def validar_variaveis():
     if faltando:
         print("Variáveis de ambiente ausentes: " + ", ".join(faltando))
         sys.exit(1)
+
+
+# -------------------------------------------------------------- período
+
+def hoje_brasil():
+    fuso = timezone(timedelta(hours=-3))
+    return datetime.now(fuso).date()
+
+
+def intervalo_mes(ano, mes):
+    ultimo = calendar.monthrange(ano, mes)[1]
+    return date(ano, mes, 1), date(ano, mes, ultimo)
+
+
+def intervalo_ano(ano):
+    return date(ano, 1, 1), date(ano, 12, 31)
+
+
+def montar_periodo(modo, id_periodo, inicio, fim):
+    return {
+        "modo": modo,
+        "id": id_periodo,
+        "inicio": inicio.strftime("%Y-%m-%d"),
+        "fim": fim.strftime("%Y-%m-%d"),
+        "filtrado": True,
+        "rotulo": f"Período: {inicio.strftime('%d/%m/%Y')} a {fim.strftime('%d/%m/%Y')}",
+    }
+
+
+def ler_data_iso(texto, nome_campo):
+    try:
+        return datetime.strptime(texto.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        print(f"Data inválida em {nome_campo}: use o formato AAAA-MM-DD (ex.: 2026-10-01).")
+        sys.exit(1)
+
+
+def definir_periodo():
+    modo = (PERIODO or "acumulado").strip().lower()
+    hoje = hoje_brasil()
+
+    if modo == "acumulado":
+        return {
+            "modo": modo, "id": "", "inicio": "", "fim": "",
+            "filtrado": False, "rotulo": "Acumulado até hoje",
+        }
+
+    if modo == "este_mes":
+        inicio, fim = intervalo_mes(hoje.year, hoje.month)
+        return montar_periodo(modo, "7", inicio, fim)
+
+    if modo == "mes_passado":
+        if hoje.month == 1:
+            inicio, fim = intervalo_mes(hoje.year - 1, 12)
+        else:
+            inicio, fim = intervalo_mes(hoje.year, hoje.month - 1)
+        return montar_periodo(modo, "8", inicio, fim)
+
+    if modo == "este_ano":
+        inicio, fim = intervalo_ano(hoje.year)
+        return montar_periodo(modo, "10", inicio, fim)
+
+    if modo == "ano_passado":
+        inicio, fim = intervalo_ano(hoje.year - 1)
+        return montar_periodo(modo, "11", inicio, fim)
+
+    if modo == "personalizado":
+        if not DATA_INICIO.strip() or not DATA_FIM.strip():
+            print("No período personalizado, informe data_inicio e data_fim (AAAA-MM-DD).")
+            sys.exit(1)
+        inicio = ler_data_iso(DATA_INICIO, "data_inicio")
+        fim = ler_data_iso(DATA_FIM, "data_fim")
+        if inicio > fim:
+            print("A data de início não pode ser maior que a data de fim.")
+            sys.exit(1)
+        return montar_periodo(modo, "", inicio, fim)
+
+    print(f"Período desconhecido: {modo}")
+    print("Use: acumulado, este_mes, mes_passado, este_ano, ano_passado ou personalizado.")
+    sys.exit(1)
+
+
+def params_periodo(periodo):
+    return {
+        "period": periodo["id"],
+        "periodStartDate": periodo["inicio"],
+        "periodEndDate": periodo["fim"],
+    }
 
 
 # ---------------------------------------------------------------- login
@@ -231,6 +324,15 @@ def texto_limpo(valor):
     return ""
 
 
+def contar_classificacao(painel, valor):
+    classificacao = painel.get("classification") or {}
+    for item in classificacao.get("items") or []:
+        if item.get("value") == valor:
+            contagem = para_int(item.get("count"))
+            return contagem if contagem is not None else 0
+    return 0
+
+
 def resumir_feedback(entrada):
     data = texto_limpo(entrada.get("DateFormatted"))
     if not data:
@@ -246,24 +348,20 @@ def resumir_feedback(entrada):
     }
 
 
-def buscar_feedbacks(sessao, id_artigo):
+def buscar_feedbacks(sessao, id_artigo, periodo):
     """Retorna a lista de feedbacks do artigo, ou None se a consulta falhou."""
     entradas = []
 
     for pagina in range(1, MAX_PAGINAS_FEEDBACK + 1):
-        dados = obter_json(
-            sessao,
-            "/KbArticle/SearchSettingsFieldsFeedback",
-            {
-                "period": "",
-                "periodStartDate": "",
-                "periodEndDate": "",
-                "articleId": id_artigo,
-                "onlyComments": "false",
-                "language": "",
-                "page": pagina,
-            },
-        )
+        params = {
+            "articleId": id_artigo,
+            "onlyComments": "false",
+            "language": "",
+            "page": pagina,
+        }
+        params.update(params_periodo(periodo))
+
+        dados = obter_json(sessao, "/KbArticle/SearchSettingsFieldsFeedback", params)
         if not isinstance(dados, dict):
             if pagina == 1:
                 return None
@@ -281,7 +379,7 @@ def buscar_feedbacks(sessao, id_artigo):
     return entradas
 
 
-def coletar_metricas(sessao, artigos):
+def coletar_metricas(sessao, artigos, periodo):
     registros = []
     falhas_seguidas = 0
 
@@ -298,28 +396,28 @@ def coletar_metricas(sessao, artigos):
             "feedbacks": [],
         }
 
-        painel = obter_json(
-            sessao,
-            "/KbArticle/Dashboard",
-            {
-                "articleId": id_artigo,
-                "periodStartDate": "",
-                "periodEndDate": "",
-                "period": "",
-                "language": "",
-            },
-        )
+        if periodo["filtrado"]:
+            registro["likes"] = None
+            registro["dislikes"] = None
+
+        params_painel = {"articleId": id_artigo, "language": ""}
+        params_painel.update(params_periodo(periodo))
+        painel = obter_json(sessao, "/KbArticle/Dashboard", params_painel)
+
         if isinstance(painel, dict):
             engajamento = painel.get("engagement") or {}
             registro["views"] = para_int(engajamento.get("NumberOfViews"))
             registro["lidos"] = para_int(engajamento.get("NumberOfReadings"))
+            if periodo["filtrado"]:
+                registro["likes"] = contar_classificacao(painel, 1)
+                registro["dislikes"] = contar_classificacao(painel, 2)
             falhas_seguidas = 0
         else:
             falhas_seguidas += 1
 
         time.sleep(PAUSA)
 
-        entradas = buscar_feedbacks(sessao, id_artigo)
+        entradas = buscar_feedbacks(sessao, id_artigo, periodo)
         if entradas is not None:
             resumos = [resumir_feedback(e) for e in entradas]
             com_conteudo = [r for r in resumos if r["motivo"] or r["comentario"]]
@@ -360,7 +458,7 @@ def criar_estilos():
         ),
         "subtitulo": ParagraphStyle(
             "SubTituloRelatorio", parent=styles["Normal"], fontSize=10,
-            textColor=colors.HexColor("#4B5563"), spaceAfter=12,
+            textColor=colors.HexColor("#4B5563"), spaceAfter=4,
         ),
         "secao": ParagraphStyle(
             "SecaoRelatorio", parent=styles["Heading2"], fontSize=13,
@@ -488,7 +586,7 @@ def adicionar_comentarios(elementos, estilos, registros):
             elementos.append(Paragraph(escape(linha_feedback(fb)), estilos["detalhe"]))
 
 
-def gerar_pdf(registros):
+def gerar_pdf(registros, periodo):
     doc = SimpleDocTemplate(
         NOME_ARQUIVO_PDF, pagesize=A4,
         rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30,
@@ -500,11 +598,12 @@ def gerar_pdf(registros):
     data_atual = datetime.now().strftime("%d/%m/%Y")
     elementos.append(
         Paragraph(
-            f"Gerado em: {data_atual} | {len(registros)} artigos analisados | "
-            "Dados acumulados até hoje",
+            f"Gerado em: {data_atual} | {len(registros)} artigos analisados",
             estilos["subtitulo"],
         )
     )
+    elementos.append(Paragraph(escape(periodo["rotulo"]), estilos["subtitulo"]))
+    elementos.append(Spacer(1, 6))
 
     adicionar_ranking(elementos, estilos, "Top 10 - Artigos mais vistos",
                       "Visualizações", registros, "views", 10, "#2563EB")
@@ -523,64 +622,7 @@ def gerar_pdf(registros):
 
 # --------------------------------------------------------------- e-mail
 
-def enviar_email():
+def enviar_email(periodo):
     if not os.path.exists(NOME_ARQUIVO_PDF):
         print("Arquivo PDF não foi gerado.")
         sys.exit(1)
-
-    msg = MIMEMultipart()
-    msg["From"] = MAIL_USERNAME
-    msg["To"] = MAIL_DESTINATARIO
-    msg["Subject"] = "Relatório Automatizado - Artigos Movidesk"
-
-    corpo = (
-        "Olá!\n\nSegue em anexo o relatório com os rankings dos artigos da "
-        "Base de Conhecimento do Movidesk.\n\n"
-        "Atenciosamente,\nAutomação VIDYA"
-    )
-    msg.attach(MIMEText(corpo, "plain", "utf-8"))
-
-    with open(NOME_ARQUIVO_PDF, "rb") as f:
-        part = MIMEBase("application", "pdf")
-        part.set_payload(f.read())
-    encoders.encode_base64(part)
-    part.add_header(
-        "Content-Disposition", f'attachment; filename="{NOME_ARQUIVO_PDF}"'
-    )
-    msg.attach(part)
-
-    destinatarios = [e.strip() for e in MAIL_DESTINATARIO.split(",")]
-
-    try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=60) as server:
-            server.starttls()
-            server.login(MAIL_USERNAME, MAIL_PASSWORD)
-            server.sendmail(MAIL_USERNAME, destinatarios, msg.as_string())
-        print("E-mail enviado com sucesso!")
-    except Exception as e:
-        print(f"Erro ao enviar e-mail: {e}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    validar_variaveis()
-
-    sessao_movidesk = criar_sessao_logada()
-
-    lista = listar_artigos(sessao_movidesk)
-    if not lista:
-        print("Nenhum artigo retornado pelo painel.")
-        sys.exit(1)
-    print(f"{len(lista)} artigos encontrados.")
-
-    registros_finais = coletar_metricas(sessao_movidesk, lista)
-
-    for nome_metrica in ["views", "lidos", "likes", "dislikes", "comentarios"]:
-        status = "ok" if metrica_disponivel(registros_finais, nome_metrica) else "SEM DADOS"
-        print(f"Métrica {nome_metrica}: {status}")
-
-    total_com_comentarios = sum(1 for r in registros_finais if (r.get("comentarios") or 0) > 0)
-    print(f"Artigos com comentários/feedback: {total_com_comentarios}")
-
-    gerar_pdf(registros_finais)
-    enviar_email()
