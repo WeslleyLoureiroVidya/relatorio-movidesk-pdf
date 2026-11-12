@@ -20,14 +20,12 @@ NOME_ARQUIVO_PDF = "relatorio_artigos_movidesk.pdf"
 
 
 def buscar_artigos_movidesk():
-  # Ajustando para a rota padrão de relatórios de artigos da Base de Conhecimento do Movidesk
   url = f"https://vidya-code.movidesk.com/api/v1/reports/articles?token={MOVIDESK_TOKEN}"
   try:
     response = requests.get(url)
     if response.status_code == 200:
       return response.json()
     else:
-      # Tentativa secundária caso a rota de relatórios exija parâmetros
       url_fallback = (
           f"https://vidya-code.movidesk.com/api/v1/kb?token={MOVIDESK_TOKEN}"
       )
@@ -35,9 +33,7 @@ def buscar_artigos_movidesk():
       if response_fb.status_code == 200:
         return response_fb.json()
 
-      print(
-          f"Erro na API do Movidesk: {response.status_code} - {response.text}"
-      )
+      print(f"Erro na API do Movidesk: {response.status_code} - {response.text}")
       return []
   except Exception as e:
     print(f"Erro de conexão: {e}")
@@ -45,7 +41,6 @@ def buscar_artigos_movidesk():
 
 
 def gerar_pdf(artigos):
-  # Se a API retornar um dicionário encapsulado, tentamos extrair a lista
   if isinstance(artigos, dict):
     artigos = (
         artigos.get("articles")
@@ -103,8 +98,7 @@ def gerar_pdf(artigos):
   data_atual = datetime.now().strftime("%d/%m/%Y")
   elementos.append(
       Paragraph(
-          f"Gerado em: {data_atual} | Período de análise: Últimos 30"
-          " dias",
+          f"Gerado em: {data_atual} | Período de análise: Últimos 30 dias",
           subtitulo_estilo,
       )
   )
@@ -155,45 +149,3 @@ def gerar_pdf(artigos):
       Paragraph("Título do Artigo", cabecalho_estilo),
       Paragraph("Views", cabecalho_estilo),
       Paragraph("Likes", cabecalho_estilo),
-      Paragraph("Dislikes", cabecalho_estilo),
-      Paragraph("Coment.", cabecalho_estilo),
-  ]]
-
-  for index, artigo in enumerate(artigos_ordenados, start=1):
-    titulo = (
-        artigo.get("title")
-        or artigo.get("subject")
-        or artigo.get("articleTitle")
-        or "Sem título"
-    )
-    views = str(
-        artigo.get("views") or artigo.get("viewCount") or artigo.get("viewsCount", 0)
-    )
-    likes = str(artigo.get("likes") or artigo.get("likesCount", 0))
-    dislikes = str(artigo.get("dislikes") or artigo.get("dislikesCount", 0))
-    comentarios = str(
-        len(artigo.get("comments", []))
-        or artigo.get("commentsCount")
-        or artigo.get("commentCount", 0)
-    )
-
-    tabela_dados.append([
-        Paragraph(str(index), celula_estilo),
-        Paragraph(titulo, celula_estilo),
-        Paragraph(views, celula_estilo),
-        Paragraph(likes, celula_estilo),
-        Paragraph(dislikes, celula_estilo),
-        Paragraph(comentarios, celula_estilo),
-    ])
-
-  tabela_artigos = Table(tabela_dados, colWidths=[25, 275, 50, 50, 50, 70])
-  tabela_artigos.setStyle(
-      TableStyle([
-          ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F2937")),
-          ("ALIGN", (0, 0), (0, -1), "CENTER"),
-          ("ALIGN", (2, 0), (-1, -1), "CENTER"),
-          ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-          ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-          ("TOPPADDING", (0, 0), (-1, -1), 6),
-          ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
-          ("GRID",
