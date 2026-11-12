@@ -2,6 +2,27 @@ name: Enviar Relatório Movidesk
 
 on:
   workflow_dispatch:
+    inputs:
+      periodo:
+        description: "Período do relatório"
+        required: true
+        default: "acumulado"
+        type: choice
+        options:
+          - acumulado
+          - este_mes
+          - mes_passado
+          - este_ano
+          - ano_passado
+          - personalizado
+      data_inicio:
+        description: "Início (AAAA-MM-DD) - só para 'personalizado'"
+        required: false
+        type: string
+      data_fim:
+        description: "Fim (AAAA-MM-DD) - só para 'personalizado'"
+        required: false
+        type: string
   schedule:
     - cron: "0 11 * * 1"   # segunda 11:00 UTC = 08:00 em Brasília
 
@@ -27,4 +48,7 @@ jobs:
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
           MAIL_DESTINATARIO: ${{ secrets.MAIL_DESTINATARIO }}
+          PERIODO: ${{ github.event.inputs.periodo || 'acumulado' }}
+          DATA_INICIO: ${{ github.event.inputs.data_inicio }}
+          DATA_FIM: ${{ github.event.inputs.data_fim }}
         run: python gerar_relatorio.py
