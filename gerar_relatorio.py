@@ -1,5 +1,6 @@
-import csv
+import json
 import os
+import re
 import sys
 import time
 import smtplib
@@ -16,38 +17,25 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-MOVIDESK_TOKEN = os.environ.get("MOVIDESK_TOKEN")
+MOVIDESK_USER = os.environ.get("MOVIDESK_USER")
+MOVIDESK_PASSWORD = os.environ.get("MOVIDESK_PASSWORD")
 MAIL_USERNAME = os.environ.get("MAIL_USERNAME")
 MAIL_PASSWORD = os.environ.get("MAIL_PASSWORD")
 MAIL_DESTINATARIO = os.environ.get("MAIL_DESTINATARIO")
 
+BASE = "https://vidya-code.movidesk.com"
 NOME_ARQUIVO_PDF = "relatorio_artigos_movidesk.pdf"
-ARQUIVO_METRICAS = "metricas_artigos.csv"
 
-URLS_CANDIDATAS = [
-    "https://api.movidesk.com/public/v1/kb/article",
-    "https://api.movidesk.com/public/v1/article",
-]
-TAMANHO_PAGINA = 100
+TAMANHO_PAGINA = 80
 MAX_PAGINAS = 100
-ESPERA_ENTRE_PAGINAS = 7  # limite da API: 10 requisições por minuto
-
-# Nome interno da métrica -> nomes aceitos como campo da API ou coluna do CSV
-ALIASES = {
-    "id": ["id"],
-    "titulo": ["titulo", "título", "title"],
-    "views": ["views", "visualizacoes", "visualizações", "viewcount", "viewscount"],
-    "lidos": ["lidos", "leituras", "reads", "readcount"],
-    "likes": ["likes", "curtidas", "likescount"],
-    "dislikes": ["dislikes", "descurtidas", "dislikescount"],
-    "comentarios": ["comentarios", "comentários", "comments", "commentscount"],
-}
-METRICAS = ["views", "lidos", "likes", "dislikes", "comentarios"]
+PAUSA = 0.25  # segundos entre consultas
+MAX_FALHAS_SEGUIDAS = 5
 
 
 def validar_variaveis():
     variaveis = {
-        "MOVIDESK_TOKEN": MOVIDESK_TOKEN,
+        "MOVIDESK_USER": MOVIDESK_USER,
+        "MOVIDESK_PASSWORD": MOVIDESK_PASSWORD,
         "MAIL_USERNAME": MAIL_USERNAME,
         "MAIL_PASSWORD": MAIL_PASSWORD,
         "MAIL_DESTINATARIO": MAIL_DESTINATARIO,
@@ -58,165 +46,210 @@ def validar_variaveis():
         sys.exit(1)
 
 
-# ---------------------------------------------------------------- API
+# ---------------------------------------------------------------- login
 
-def buscar_com_url(url):
-    """Retorna a lista de artigos, ou None se a URL deu 404."""
-    artigos = []
-    total = None
+def ler_json(texto):
+    """Aceita JSON puro ou JSONP (callback(...))."""
+    texto = (texto or "").strip()
+    if not texto:
+        return None
+    try:
+        if texto[0] in "{[":
+            return json.loads(texto)
+        achado = re.match(r"^[^(]*\((.*)\)\s*;?\s*$", texto, re.DOTALL)
+        if achado:
+            return json.loads(achado.group(1))
+    except ValueError:
+        return None
+    return None
 
-    for pagina in range(MAX_PAGINAS):
-        if pagina > 0:
-            time.sleep(ESPERA_ENTRE_PAGINAS)
 
-        params = {
-            "token": MOVIDESK_TOKEN,
-            "page": pagina,
-            "pageSize": TAMANHO_PAGINA,
-        }
+def extrair_token(html):
+    padroes = [
+        r'name="__RequestVerificationToken"[^>]*value="([^"]+)"',
+        r'value="([^"]+)"[^>]*name="__RequestVerificationToken"',
+    ]
+    for padrao in padroes:
+        achado = re.search(padrao, html)
+        if achado:
+            return achado.group(1)
+    return None
+
+
+def criar_sessao_logada():
+    sessao = requests.Session()
+    sessao.headers.update({"User-Agent": "Mozilla/5.0 (relatorio-automatico)"})
+
+    pagina = sessao.get(BASE + "/", timeout=60)
+    token = extrair_token(pagina.text)
+    if token is None:
+        print("Aviso: token anti-forgery não encontrado na página de login.")
+
+    dados = {
+        "UseCaptcha": "False",
+        "ValidateCaptcha": "False",
+        "ReturnUrl": "",
+        "SsoProviderType": "",
+        "UserName": MOVIDESK_USER,
+        "UserNameError": "",
+        "Password": MOVIDESK_PASSWORD,
+        "PasswordError": "",
+    }
+    if token:
+        dados["__RequestVerificationToken"] = token
+
+    cabecalhos = {
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": BASE + "/",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+    }
+    resposta = sessao.post(
+        BASE + "/Account/Login", data=dados, headers=cabecalhos, timeout=60
+    )
+    print(f"Login: HTTP {resposta.status_code}")
+    print("Resposta do login (início):", resposta.text[:150].replace("\n", " "))
+
+    # Confirma que a sessão está valida consultando a lista de artigos
+    teste = sessao.get(
+        BASE + "/KbArticle/Json", params={"Start": 0, "Limit": 1}, timeout=60
+    )
+    dados_teste = ler_json(teste.text)
+    if not isinstance(dados_teste, dict) or "results" not in dados_teste:
+        print("Falha no login: a lista de artigos não foi retornada.")
+        print("Possíveis causas: usuário/senha errados, MFA ou captcha ativo.")
+        sys.exit(1)
+
+    print("Login confirmado.")
+    return sessao
+
+
+# ---------------------------------------------------------------- dados
+
+def obter_json(sessao, caminho, params):
+    for tentativa in range(3):
         try:
-            response = requests.get(url, params=params, timeout=60)
+            resposta = sessao.get(BASE + caminho, params=params, timeout=60)
+            if resposta.status_code == 200:
+                dados = ler_json(resposta.text)
+                if dados is not None:
+                    return dados
+            print(f"Falha em {caminho}: HTTP {resposta.status_code}")
         except Exception as e:
-            print(f"Erro de conexão: {e}")
-            return artigos
+            print(f"Erro de conexão em {caminho}: {e}")
+        time.sleep(2)
+    return None
 
-        if response.status_code == 404 and pagina == 0:
-            print(f"404 em {url}")
-            return None
 
-        if response.status_code != 200:
-            print(f"Erro na API do Movidesk: {response.status_code}")
-            print(response.text[:300])
-            return artigos
+def listar_artigos(sessao):
+    artigos = []
+    vistos = set()
+    inicio = 0
 
-        try:
-            dados = response.json()
-        except ValueError:
-            print("Resposta da API não é JSON válido:")
-            print(response.text[:300])
-            return artigos
-
-        if isinstance(dados, dict):
-            itens = dados.get("items") or []
-            if total is None:
-                total = dados.get("totalSize")
-        else:
-            itens = dados
-
-        if not itens:
+    for _ in range(MAX_PAGINAS):
+        dados = obter_json(
+            sessao, "/KbArticle/Json", {"Start": inicio, "Limit": TAMANHO_PAGINA}
+        )
+        if not isinstance(dados, dict):
             break
 
-        artigos.extend(itens)
-        if total is not None and len(artigos) >= total:
+        itens = dados.get("results") or []
+        total = dados.get("hits")
+
+        for item in itens:
+            id_artigo = item.get("Id")
+            if id_artigo not in vistos:
+                vistos.add(id_artigo)
+                artigos.append(item)
+
+        inicio += TAMANHO_PAGINA
+        if not itens or (total is not None and inicio >= total):
             break
+        time.sleep(PAUSA)
 
     return artigos
 
 
-def buscar_artigos_movidesk():
-    for url in URLS_CANDIDATAS:
-        print(f"Tentando {url}")
-        resultado = buscar_com_url(url)
-        if resultado is not None:
-            print(f"Endpoint que funcionou: {url}")
-            return resultado
-    return []
-
-
-# ------------------------------------------------------------ métricas
-
-def normalizar_titulo(texto):
-    return " ".join(str(texto or "").lower().split())
-
-
-def para_numero(valor):
-    if valor is None:
-        return None
+def para_int(valor):
     if isinstance(valor, bool):
         return None
     if isinstance(valor, (int, float)):
         return int(valor)
-    texto = str(valor).strip().replace(".", "").replace(",", ".")
-    if not texto:
-        return None
-    try:
-        return int(float(texto))
-    except ValueError:
-        return None
-
-
-def pegar(origem, nome_interno):
-    """Busca o valor em um dict (item da API ou linha do CSV) usando os aliases."""
-    chaves = {str(k).strip().lower(): v for k, v in origem.items()}
-    for alias in ALIASES[nome_interno]:
-        if alias in chaves and chaves[alias] not in (None, ""):
-            return chaves[alias]
     return None
 
 
-def contar_comentarios_api(item):
-    comentarios = item.get("comments")
-    if isinstance(comentarios, list):
-        return len(comentarios)
-    return para_numero(pegar(item, "comentarios"))
+def coletar_metricas(sessao, artigos):
+    registros = []
+    falhas_seguidas = 0
+    estrutura_comentario_mostrada = False
 
+    for posicao, artigo in enumerate(artigos, start=1):
+        id_artigo = artigo.get("Id")
+        registro = {
+            "id": id_artigo,
+            "titulo": artigo.get("Title") or "Sem título",
+            "likes": para_int(artigo.get("PositiveRatingCount")),
+            "dislikes": para_int(artigo.get("NegativeRatingCount")),
+            "views": None,
+            "lidos": None,
+            "comentarios": None,
+        }
 
-def registro_da_api(item):
-    registro = {
-        "id": str(item.get("id")) if item.get("id") is not None else None,
-        "titulo": item.get("title") or "Sem título",
-    }
-    for metrica in METRICAS:
-        if metrica == "comentarios":
-            registro[metrica] = contar_comentarios_api(item)
+        painel = obter_json(
+            sessao,
+            "/KbArticle/Dashboard",
+            {
+                "articleId": id_artigo,
+                "periodStartDate": "",
+                "periodEndDate": "",
+                "period": "",
+                "language": "",
+            },
+        )
+        if isinstance(painel, dict):
+            engajamento = painel.get("engagement") or {}
+            registro["views"] = para_int(engajamento.get("NumberOfViews"))
+            registro["lidos"] = para_int(engajamento.get("NumberOfReadings"))
+            falhas_seguidas = 0
         else:
-            registro[metrica] = para_numero(pegar(item, metrica))
-    return registro
+            falhas_seguidas += 1
 
+        time.sleep(PAUSA)
 
-def ler_csv(caminho):
-    if not os.path.exists(caminho):
-        print(f"Arquivo {caminho} não encontrado: usando só os dados da API.")
-        return []
+        feedback = obter_json(
+            sessao,
+            "/KbArticle/SearchSettingsFieldsFeedback",
+            {
+                "period": "",
+                "periodStartDate": "",
+                "periodEndDate": "",
+                "articleId": id_artigo,
+                "onlyComments": "true",
+                "language": "",
+                "page": 1,
+            },
+        )
+        if isinstance(feedback, dict):
+            resultados = feedback.get("results") or []
+            quantidade = para_int(feedback.get("count"))
+            if quantidade is None:
+                quantidade = len(resultados)
+            registro["comentarios"] = quantidade
 
-    with open(caminho, "r", encoding="utf-8-sig", newline="") as f:
-        primeira = f.readline()
-        f.seek(0)
-        delimitador = ";" if primeira.count(";") >= primeira.count(",") else ","
-        leitor = csv.DictReader(f, delimiter=delimitador)
-        linhas = [dict(linha) for linha in leitor]
+            if resultados and not estrutura_comentario_mostrada:
+                primeiro = resultados[0]
+                if isinstance(primeiro, dict):
+                    print("Estrutura de um comentário (campos):", sorted(primeiro.keys()))
+                estrutura_comentario_mostrada = True
 
-    print(f"{len(linhas)} linhas lidas de {caminho}.")
-    return linhas
+        registros.append(registro)
 
+        if falhas_seguidas >= MAX_FALHAS_SEGUIDAS:
+            print("Muitas falhas seguidas: a sessão pode ter expirado. Abortando.")
+            sys.exit(1)
 
-def montar_registros(artigos_api, linhas_csv):
-    registros = [registro_da_api(a) for a in artigos_api]
-    por_id = {r["id"]: r for r in registros if r["id"]}
-    por_titulo = {normalizar_titulo(r["titulo"]): r for r in registros}
-
-    for linha in linhas_csv:
-        id_csv = pegar(linha, "id")
-        titulo_csv = pegar(linha, "titulo")
-
-        alvo = None
-        if id_csv is not None:
-            alvo = por_id.get(str(id_csv).strip())
-        if alvo is None and titulo_csv is not None:
-            alvo = por_titulo.get(normalizar_titulo(titulo_csv))
-
-        if alvo is None:
-            alvo = {"id": None, "titulo": titulo_csv or "Sem título"}
-            for metrica in METRICAS:
-                alvo[metrica] = None
-            registros.append(alvo)
-            if titulo_csv:
-                por_titulo[normalizar_titulo(titulo_csv)] = alvo
-
-        for metrica in METRICAS:
-            valor = para_numero(pegar(linha, metrica))
-            if valor is not None:
-                alvo[metrica] = valor
+        if posicao % 20 == 0:
+            print(f"{posicao}/{len(artigos)} artigos consultados...")
+        time.sleep(PAUSA)
 
     return registros
 
@@ -278,24 +311,7 @@ def estilo_tabela(cor_cabecalho):
     )
 
 
-def adicionar_ranking(elementos, estilos, titulo_secao, rotulo, registros, metrica, quantidade, cor):
-    elementos.append(Paragraph(titulo_secao, estilos["secao"]))
-
-    if not metrica_disponivel(registros, metrica):
-        elementos.append(
-            Paragraph(
-                "Dado não disponível: a API do Movidesk não retorna esta métrica "
-                f"e ela não consta em {ARQUIVO_METRICAS}.",
-                estilos["aviso"],
-            )
-        )
-        return
-
-    itens = top(registros, metrica, quantidade)
-    if not itens:
-        elementos.append(Paragraph("Nenhum artigo com valor maior que zero.", estilos["celula"]))
-        return
-
+def montar_tabela(estilos, rotulo, itens, metrica, cor):
     linhas = [[
         Paragraph("#", estilos["cabecalho"]),
         Paragraph("Título do Artigo", estilos["cabecalho"]),
@@ -307,10 +323,26 @@ def adicionar_ranking(elementos, estilos, titulo_secao, rotulo, registros, metri
             Paragraph(escape(str(r["titulo"])), estilos["celula"]),
             Paragraph(str(r[metrica]), estilos["celula"]),
         ])
-
     tabela = Table(linhas, colWidths=[28, 407, 90], repeatRows=1)
     tabela.setStyle(estilo_tabela(cor))
-    elementos.append(tabela)
+    return tabela
+
+
+def adicionar_ranking(elementos, estilos, titulo_secao, rotulo, registros, metrica, quantidade, cor):
+    elementos.append(Paragraph(titulo_secao, estilos["secao"]))
+
+    if not metrica_disponivel(registros, metrica):
+        elementos.append(
+            Paragraph("Dado não disponível: o Movidesk não retornou esta métrica.", estilos["aviso"])
+        )
+        return
+
+    itens = top(registros, metrica, quantidade)
+    if not itens:
+        elementos.append(Paragraph("Nenhum artigo com valor maior que zero.", estilos["celula"]))
+        return
+
+    elementos.append(montar_tabela(estilos, rotulo, itens, metrica, cor))
 
 
 def adicionar_comentarios(elementos, estilos, registros):
@@ -318,11 +350,7 @@ def adicionar_comentarios(elementos, estilos, registros):
 
     if not metrica_disponivel(registros, "comentarios"):
         elementos.append(
-            Paragraph(
-                "Dado não disponível: a API do Movidesk não retorna comentários "
-                f"e eles não constam em {ARQUIVO_METRICAS}.",
-                estilos["aviso"],
-            )
+            Paragraph("Dado não disponível: o Movidesk não retornou comentários.", estilos["aviso"])
         )
         return
 
@@ -333,21 +361,7 @@ def adicionar_comentarios(elementos, estilos, registros):
         elementos.append(Paragraph("Nenhum artigo possui comentários.", estilos["celula"]))
         return
 
-    linhas = [[
-        Paragraph("#", estilos["cabecalho"]),
-        Paragraph("Título do Artigo", estilos["cabecalho"]),
-        Paragraph("Comentários", estilos["cabecalho"]),
-    ]]
-    for posicao, r in enumerate(itens, start=1):
-        linhas.append([
-            Paragraph(str(posicao), estilos["celula"]),
-            Paragraph(escape(str(r["titulo"])), estilos["celula"]),
-            Paragraph(str(r["comentarios"]), estilos["celula"]),
-        ])
-
-    tabela = Table(linhas, colWidths=[28, 407, 90], repeatRows=1)
-    tabela.setStyle(estilo_tabela("#7C3AED"))
-    elementos.append(tabela)
+    elementos.append(montar_tabela(estilos, "Comentários", itens, "comentarios", "#7C3AED"))
 
 
 def gerar_pdf(registros):
@@ -362,12 +376,13 @@ def gerar_pdf(registros):
     data_atual = datetime.now().strftime("%d/%m/%Y")
     elementos.append(
         Paragraph(
-            f"Gerado em: {data_atual} | {len(registros)} artigos analisados",
+            f"Gerado em: {data_atual} | {len(registros)} artigos analisados | "
+            "Dados acumulados até hoje",
             estilos["subtitulo"],
         )
     )
 
-    adicionar_ranking(elementos, estilos, "Top 10 - Artigos mais vistos (até hoje)",
+    adicionar_ranking(elementos, estilos, "Top 10 - Artigos mais vistos",
                       "Visualizações", registros, "views", 10, "#2563EB")
     adicionar_ranking(elementos, estilos, "Top 10 - Artigos mais lidos",
                       "Leituras", registros, "lidos", 10, "#0891B2")
@@ -426,17 +441,17 @@ def enviar_email():
 if __name__ == "__main__":
     validar_variaveis()
 
-    artigos_api = buscar_artigos_movidesk()
-    linhas_csv = ler_csv(ARQUIVO_METRICAS)
+    sessao_movidesk = criar_sessao_logada()
 
-    if not artigos_api and not linhas_csv:
-        print("Nenhum dado retornado pela API nem pelo CSV.")
+    lista = listar_artigos(sessao_movidesk)
+    if not lista:
+        print("Nenhum artigo retornado pelo painel.")
         sys.exit(1)
+    print(f"{len(lista)} artigos encontrados.")
 
-    registros_finais = montar_registros(artigos_api, linhas_csv)
-    print(f"{len(registros_finais)} artigos no relatório.")
+    registros_finais = coletar_metricas(sessao_movidesk, lista)
 
-    for nome_metrica in METRICAS:
+    for nome_metrica in ["views", "lidos", "likes", "dislikes", "comentarios"]:
         status = "ok" if metrica_disponivel(registros_finais, nome_metrica) else "SEM DADOS"
         print(f"Métrica {nome_metrica}: {status}")
 
