@@ -1,3 +1,25 @@
+name: Enviar Relatório Movidesk
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 11 * * 1"   # segunda 11:00 UTC = 08:00 em Brasília
+
+jobs:
+  gerar-e-enviar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do Repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Instalar Dependencias
+        run: pip install requests reportlab
+
       - name: Executar Script de Geracao e Envio
         env:
           MOVIDESK_USER: ${{ secrets.MOVIDESK_USER }}
