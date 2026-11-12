@@ -144,8 +144,108 @@ def gerar_pdf(artigos):
       artigos, key=lambda x: x.get("views", 0), reverse=True
   )
 
-  tabela_dados = [[
-      Paragraph("#", cabecalho_estilo),
-      Paragraph("Título do Artigo", cabecalho_estilo),
-      Paragraph("Views", cabecalho_estilo),
-      Paragraph("Likes", cabecalho_estilo),
+  tabela_dados = [
+      [
+          Paragraph("#", cabecalho_estilo),
+          Paragraph("Título do Artigo", cabecalho_estilo),
+          Paragraph("Views", cabecalho_estilo),
+          Paragraph("Likes", cabecalho_estilo),
+          Paragraph("Dislikes", cabecalho_estilo),
+          Paragraph("Coment.", cabecalho_estilo),
+      ]
+  ]
+
+  for index, artigo in enumerate(artigos_ordenados, start=1):
+    titulo = (
+        artigo.get("title")
+        or artigo.get("subject")
+        or artigo.get("articleTitle")
+        or "Sem título"
+    )
+    views = str(
+        artigo.get("views") or artigo.get("viewCount") or artigo.get("viewsCount", 0)
+    )
+    likes = str(artigo.get("likes") or artigo.get("likesCount", 0))
+    dislikes = str(artigo.get("dislikes") or artigo.get("dislikesCount", 0))
+    comentarios = str(
+        len(artigo.get("comments", []))
+        or artigo.get("commentsCount")
+        or artigo.get("commentCount", 0)
+    )
+
+    tabela_dados.append([
+        Paragraph(str(index), celula_estilo),
+        Paragraph(titulo, celula_estilo),
+        Paragraph(views, celula_estilo),
+        Paragraph(likes, celula_estilo),
+        Paragraph(dislikes, celula_estilo),
+        Paragraph(comentarios, celula_estilo),
+    ])
+
+  tabela_artigos = Table(tabela_dados, colWidths=[25, 275, 50, 50, 50, 70])
+  tabela_artigos.setStyle(
+      TableStyle([
+          ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F2937")),
+          ("ALIGN", (0, 0), (0, -1), "CENTER"),
+          ("ALIGN", (2, 0), (-1, -1), "CENTER"),
+          ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+          ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+          ("TOPPADDING", (0, 0), (-1, -1), 6),
+          (
+              "ROWBACKGROUNDS",
+              (0, 1),
+              (-1, -1),
+              [colors.white, colors.HexColor("#F9FAFB")],
+          ),
+          ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
+      ])
+  )
+
+  elementos.append(tabela_artigos)
+  doc.build(elementos)
+
+
+def enviar_email():
+  if not os.path.exists(NOME_ARQUIVO_PDF):
+    print("Arquivo PDF não foi gerado.")
+    return
+
+  msg = MIMEMultipart()
+  msg["From"] = MAIL_USERNAME
+  msg["To"] = MAIL_DESTINATARIO
+  msg["Subject"] = "📊 Relatório Automatizado - Artigos Movidesk"
+
+  corpo = (
+      "Olá!\n\nSegue em anexo o relatório consolidado com o ranking dos artigos"
+      " da Base de Conhecimento do Movidesk (últimos 30 dias).\n\nAtenciosamente,\nAutomação"
+      " VIDYA"
+  )
+  msg.attach(MIMEText(corpo, "plain"))
+
+  with open(NOME_ARQUIVO_PDF, "rb") as f:
+    part = MIMEBase("application", "octet-stream")
+    part.set_payload(f.read())
+  encoders.encode_base64(part)
+  part.add_header(
+      "Content-Disposition", f"attachment; filename= {NOME_ARQUIVO_PDF}"
+  )
+  msg.attach(part)
+
+  try:
+    server = smtplib.SMTP("smtp.gmail.com", 587)
+    server.starttls()
+    server.login(MAIL_USERNAME, MAIL_PASSWORD)
+    server.sendmail(MAIL_USERNAME, MAIL_DESTINATARIO, msg.as_string())
+    server.quit()
+    print("E-mail enviado com sucesso!")
+  except Exception as e:
+    print(f"Erro ao enviar e-mail: {e}")
+
+
+if __name__ == "__main__":
+  dados_artigos = buscar_artigos_movidesk()
+  if dados_artigos:
+    gerar_pdf(dados_artigos)
+    enviar_email()
+  else:
+    print("Nenhum dado retornado pela API do Movidesk.")
