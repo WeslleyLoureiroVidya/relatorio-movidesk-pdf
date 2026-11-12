@@ -20,7 +20,8 @@ NOME_ARQUIVO_PDF = "relatorio_artigos_movidesk.pdf"
 
 
 def buscar_artigos_movidesk():
-  url = f"https://api.movidesk.com/api/v1/kb/articles?token={MOVIDESK_TOKEN}"
+  # URL corrigida para o subdomínio da VIDYA
+  url = f"https://vidya-code.movidesk.com/api/v1/kb/articles?token={MOVIDESK_TOKEN}"
   try:
     response = requests.get(url)
     if response.status_code == 200:
