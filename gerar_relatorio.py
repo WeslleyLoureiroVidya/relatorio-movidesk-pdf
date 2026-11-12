@@ -28,8 +28,11 @@ NOME_ARQUIVO_PDF = "relatorio_artigos_movidesk.pdf"
 
 TAMANHO_PAGINA = 80
 MAX_PAGINAS = 100
-PAUSA = 0.25  # segundos entre consultas
-MAX_FALHAS_SEGUIDAS = 5
+PAUSA = 0.4  # segundos entre consultas
+MAX_FALHAS_SEGUIDAS = 8
+MAX_DIAGNOSTICOS = 6
+
+contador_diagnosticos = {"n": 0}
 
 
 def validar_variaveis():
@@ -64,6 +67,10 @@ def ler_json(texto):
     return None
 
 
+def parece_html(texto):
+    return (texto or "").lstrip()[:1] == "<"
+
+
 def extrair_token(html):
     padroes = [
         r'name="__RequestVerificationToken"[^>]*value="([^"]+)"',
@@ -76,10 +83,7 @@ def extrair_token(html):
     return None
 
 
-def criar_sessao_logada():
-    sessao = requests.Session()
-    sessao.headers.update({"User-Agent": "Mozilla/5.0 (relatorio-automatico)"})
-
+def fazer_login(sessao):
     pagina = sessao.get(BASE + "/", timeout=60)
     token = extrair_token(pagina.text)
     if token is None:
@@ -109,7 +113,13 @@ def criar_sessao_logada():
     print(f"Login: HTTP {resposta.status_code}")
     print("Resposta do login (início):", resposta.text[:150].replace("\n", " "))
 
-    # Confirma que a sessão está valida consultando a lista de artigos
+
+def criar_sessao_logada():
+    sessao = requests.Session()
+    sessao.headers.update({"User-Agent": "Mozilla/5.0 (relatorio-automatico)"})
+
+    fazer_login(sessao)
+
     teste = sessao.get(
         BASE + "/KbArticle/Json", params={"Start": 0, "Limit": 1}, timeout=60
     )
@@ -125,18 +135,52 @@ def criar_sessao_logada():
 
 # ---------------------------------------------------------------- dados
 
+def registrar_falha(caminho, params, resposta):
+    if contador_diagnosticos["n"] >= MAX_DIAGNOSTICOS:
+        return
+    contador_diagnosticos["n"] += 1
+    trecho = (resposta.text or "")[:120].replace("\n", " ").replace("\r", " ")
+    print(
+        f"[diagnóstico] {caminho} artigo={params.get('articleId')} "
+        f"HTTP {resposta.status_code} "
+        f"tipo={resposta.headers.get('Content-Type')} "
+        f"tamanho={len(resposta.text or '')} "
+        f"início={trecho!r}"
+    )
+
+
 def obter_json(sessao, caminho, params):
-    for tentativa in range(3):
+    relogou = False
+    tentativa = 0
+
+    while tentativa < 3:
+        tentativa += 1
         try:
             resposta = sessao.get(BASE + caminho, params=params, timeout=60)
-            if resposta.status_code == 200:
-                dados = ler_json(resposta.text)
-                if dados is not None:
-                    return dados
-            print(f"Falha em {caminho}: HTTP {resposta.status_code}")
         except Exception as e:
             print(f"Erro de conexão em {caminho}: {e}")
+            time.sleep(2)
+            continue
+
+        if resposta.status_code == 200:
+            dados = ler_json(resposta.text)
+            if dados is not None:
+                return dados
+
+            if parece_html(resposta.text) and not relogou:
+                print("Sessão parece ter expirado. Refazendo login...")
+                relogou = True
+                try:
+                    fazer_login(sessao)
+                except Exception as e:
+                    print(f"Erro ao refazer login: {e}")
+                tentativa -= 1
+                continue
+
+        registrar_falha(caminho, params, resposta)
+        print(f"Falha em {caminho}: HTTP {resposta.status_code}")
         time.sleep(2)
+
     return None
 
 
@@ -244,7 +288,7 @@ def coletar_metricas(sessao, artigos):
         registros.append(registro)
 
         if falhas_seguidas >= MAX_FALHAS_SEGUIDAS:
-            print("Muitas falhas seguidas: a sessão pode ter expirado. Abortando.")
+            print(f"Muitas falhas seguidas (último artigo: {id_artigo}). Abortando.")
             sys.exit(1)
 
         if posicao % 20 == 0:
