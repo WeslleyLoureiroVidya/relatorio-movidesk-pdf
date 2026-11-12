@@ -20,14 +20,24 @@ NOME_ARQUIVO_PDF = "relatorio_artigos_movidesk.pdf"
 
 
 def buscar_artigos_movidesk():
-  # URL corrigida para o subdomínio da VIDYA
-  url = f"https://vidya-code.movidesk.com/api/v1/kb/articles?token={MOVIDESK_TOKEN}"
+  # Ajustando para a rota padrão de relatórios de artigos da Base de Conhecimento do Movidesk
+  url = f"https://vidya-code.movidesk.com/api/v1/reports/articles?token={MOVIDESK_TOKEN}"
   try:
     response = requests.get(url)
     if response.status_code == 200:
       return response.json()
     else:
-      print(f"Erro na API do Movidesk: {response.status_code} - {response.text}")
+      # Tentativa secundária caso a rota de relatórios exija parâmetros
+      url_fallback = (
+          f"https://vidya-code.movidesk.com/api/v1/kb?token={MOVIDESK_TOKEN}"
+      )
+      response_fb = requests.get(url_fallback)
+      if response_fb.status_code == 200:
+        return response_fb.json()
+
+      print(
+          f"Erro na API do Movidesk: {response.status_code} - {response.text}"
+      )
       return []
   except Exception as e:
     print(f"Erro de conexão: {e}")
@@ -35,6 +45,19 @@ def buscar_artigos_movidesk():
 
 
 def gerar_pdf(artigos):
+  # Se a API retornar um dicionário encapsulado, tentamos extrair a lista
+  if isinstance(artigos, dict):
+    artigos = (
+        artigos.get("articles")
+        or artigos.get("value")
+        or list(artigos.values())[0]
+        if artigos
+        else []
+    )
+
+  if not isinstance(artigos, list):
+    artigos = []
+
   doc = SimpleDocTemplate(
       NOME_ARQUIVO_PDF,
       pagesize=A4,
@@ -137,12 +160,21 @@ def gerar_pdf(artigos):
   ]]
 
   for index, artigo in enumerate(artigos_ordenados, start=1):
-    titulo = artigo.get("title") or artigo.get("subject") or "Sem título"
-    views = str(artigo.get("views", 0))
-    likes = str(artigo.get("likes", 0))
-    dislikes = str(artigo.get("dislikes", 0))
+    titulo = (
+        artigo.get("title")
+        or artigo.get("subject")
+        or artigo.get("articleTitle")
+        or "Sem título"
+    )
+    views = str(
+        artigo.get("views") or artigo.get("viewCount") or artigo.get("viewsCount", 0)
+    )
+    likes = str(artigo.get("likes") or artigo.get("likesCount", 0))
+    dislikes = str(artigo.get("dislikes") or artigo.get("dislikesCount", 0))
     comentarios = str(
-        len(artigo.get("comments", [])) or artigo.get("commentsCount", 0)
+        len(artigo.get("comments", []))
+        or artigo.get("commentsCount")
+        or artigo.get("commentCount", 0)
     )
 
     tabela_dados.append([
@@ -164,49 +196,4 @@ def gerar_pdf(artigos):
           ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
           ("TOPPADDING", (0, 0), (-1, -1), 6),
           ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
-          ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E5E7EB")),
-      ])
-  )
-
-  elementos.append(tabela_artigos)
-  doc.build(elementos)
-
-
-def enviar_email():
-  msg = MIMEMultipart()
-  msg["From"] = MAIL_USERNAME
-  msg["To"] = MAIL_DESTINATARIO
-  msg["Subject"] = "📊 Relatório Automatizado - Artigos Movidesk"
-
-  corpo = (
-      "Olá!\n\nSegue em anexo o relatório consolidado com o ranking dos artigos"
-      " da Base de Conhecimento do Movidesk (últimos 30 dias).\n\nAtenciosamente,\nAutomação"
-      " VIDYA"
-  )
-  msg.attach(MIMEText(corpo, "plain"))
-
-  with open(NOME_ARQUIVO_PDF, "rb") as f:
-    part = MIMEBase("application", "octet-stream")
-    part.set_payload(f.read())
-  encoders.encode_base64(part)
-  part.add_header(
-      "Content-Disposition", f"attachment; filename= {NOME_ARQUIVO_PDF}"
-  )
-  msg.attach(part)
-
-  try:
-    server = smtplib.SMTP("smtp.gmail.com", 587)
-    server.starttls()
-    server.login(MAIL_USERNAME, MAIL_PASSWORD)
-    server.sendmail(MAIL_USERNAME, MAIL_DESTINATARIO, msg.as_string())
-    server.quit()
-    print("E-mail enviado com sucesso!")
-  except Exception as e:
-    print(f"Erro ao enviar e-mail: {e}")
-
-
-if __name__ == "__main__":
-  dados_artigos = buscar_artigos_movidesk()
-  if dados_artigos:
-    gerar_pdf(dados_artigos)
-    enviar_email()
+          ("GRID",
