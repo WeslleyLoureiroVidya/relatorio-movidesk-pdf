@@ -20,19 +20,14 @@ NOME_ARQUIVO_PDF = "relatorio_artigos_movidesk.pdf"
 
 
 def buscar_artigos_movidesk():
-  url = f"https://vidya-code.movidesk.com/api/v1/reports/articles?token={MOVIDESK_TOKEN}"
+  # Endpoint oficial da Base de Conhecimento (KB) do Movidesk
+  url = f"https://vidya-code.movidesk.com/api/v1/kb?token={MOVIDESK_TOKEN}"
   try:
     response = requests.get(url)
     if response.status_code == 200:
-      return response.json()
+      dados = response.json()
+      return dados if isinstance(dados, list) else [dados]
     else:
-      url_fallback = (
-          f"https://vidya-code.movidesk.com/api/v1/kb?token={MOVIDESK_TOKEN}"
-      )
-      response_fb = requests.get(url_fallback)
-      if response_fb.status_code == 200:
-        return response_fb.json()
-
       print(f"Erro na API do Movidesk: {response.status_code} - {response.text}")
       return []
   except Exception as e:
@@ -41,15 +36,6 @@ def buscar_artigos_movidesk():
 
 
 def gerar_pdf(artigos):
-  if isinstance(artigos, dict):
-    artigos = (
-        artigos.get("articles")
-        or artigos.get("value")
-        or list(artigos.values())[0]
-        if artigos
-        else []
-    )
-
   if not isinstance(artigos, list):
     artigos = []
 
